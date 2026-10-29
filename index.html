@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapa de la ISS en vivo</title>
+
+<!-- Leaflet: librería gratuita para dibujar mapas interactivos -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+<style>
+  /* ---------- ESTILO (cómo se ve la página) ---------- */
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #1f2937; background: #f3f4f6; }
+  header { padding: 10px 16px; background: #1f4e78; color: #fff; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 2px 0 0; font-size: 12px; opacity: .85; }
+  main { display: flex; height: calc(100vh - 62px); }
+  #mapa { flex: 1; background: #0b1d3a; }
+  aside { width: 340px; overflow-y: auto; padding: 12px; background: #fff; border-left: 1px solid #d1d5db; }
+  .dato { padding: 8px 0; border-bottom: 1px solid #e5e7eb; }
+  .dato .nombre { font-size: 12px; color: #6b7280; }
+  .dato .valor { font-size: 20px; font-weight: bold; }
+  .dato .ruta { font-size: 11px; color: #9ca3af; font-family: Consolas, monospace; }
+  #estado { font-size: 13px; padding: 8px; border-radius: 6px; background: #eef2ff; margin-bottom: 8px; }
+  #estado.error, #avisoMapa.error { background: #fee2e2; color: #991b1b; }
+  .controles { margin: 10px 0; font-size: 14px; }
+  button { padding: 6px 10px; cursor: pointer; }
+  h2 { font-size: 14px; margin: 14px 0 6px; }
+  pre { background: #111827; color: #d1fae5; padding: 8px; border-radius: 6px; font-size: 11px;
+        white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; }
+  footer { font-size: 11px; color: #6b7280; margin-top: 12px; }
+  @media (max-width: 800px) {
+    main { flex-direction: column; height: auto; }
+    #mapa { height: 55vh; flex: none; }
+    aside { width: 100%; border-left: none; }
+  }
+</style>
+</head>
+
+<body>
+<header>
+  <h1>🛰️ Estación Espacial Internacional en vivo</h1>
+  <p>Los datos llegan de una API cada pocos segundos</p>
+</header>
+
+<main>
+  <div id="mapa"></div>
+
+  <aside>
+    <div id="estado">Esperando el primer dato...</div>
+    <div id="avisoMapa" class="error" style="display:none; font-size:13px; padding:8px; border-radius:6px; margin-bottom:8px;">No cargaron las imágenes del mapa de fondo. El punto y los datos siguen funcionando.</div>
+
+    <div class="dato"><div class="nombre">Latitud (grados)</div>
+      <div class="valor" id="lat">—</div><div class="ruta">datos.latitude</div></div>
+    <div class="dato"><div class="nombre">Longitud (grados)</div>
+      <div class="valor" id="lon">—</div><div class="ruta">datos.longitude</div></div>
+    <div class="dato"><div class="nombre">Altitud sobre la superficie</div>
+      <div class="valor" id="alt">—</div><div class="ruta">datos.altitude</div></div>
+    <div class="dato"><div class="nombre">Velocidad</div>
+      <div class="valor" id="vel">—</div><div class="ruta">datos.velocity</div></div>
+    <div class="dato"><div class="nombre">¿Le da el Sol?</div>
+      <div class="valor" id="vis" style="font-size:15px">—</div><div class="ruta">datos.visibility</div></div>
+    <div class="dato"><div class="nombre">Hora de la posición (UTC)</div>
+      <div class="valor" id="hora" style="font-size:14px">—</div><div class="ruta">datos.timestamp</div></div>
+
+    <div class="controles">
+      <label><input type="checkbox" id="seguir" checked> Seguir a la ISS con el mapa</label><br><br>
+      <button id="borrar">Borrar estela</button>
+    </div>
+
+    <h2>Respuesta JSON tal como llega de la API</h2>
+    <pre id="json">(aún no hay datos)</pre>
+
+    <footer>
+      Datos: API pública wheretheiss.at (máx. 1 consulta por segundo).<br>
+      Mapa: imágenes NASA Blue Marble (GIBS) · Librería: Leaflet.
+    </footer>
+  </aside>
+</main>
+
+<script>
+  // ---------- AJUSTES (puedes cambiarlos) ----------
+  const URL_API = "https://api.wheretheiss.at/v1/satellites/25544"; // 25544 = código de la ISS
+  const CADA_SEGUNDOS = 5;        // cada cuánto preguntamos la posición
+  const MAX_PUNTOS_ESTELA = 600;  // cuántos puntos recordamos para dibujar la estela
+
+  // ---------- 1. PREPARAR EL MAPA ----------
+  const estado = document.getElementById("estado");
+
+  if (typeof L === "undefined") {
+    estado.className = "error";
+    estado.textContent = "No se pudo cargar la librería del mapa. Revisa tu conexión a internet y recarga la página.";
+    throw new Error("Leaflet no cargó");
+  }
+
+  const mapa = L.map("mapa", { worldCopyJump: true }).setView([0, 0], 2);
+
+  // Imágenes del mapa: "Blue Marble" de la NASA (servicio público GIBS, sin clave ni registro).
+  // Los servidores de OpenStreetMap y CARTO bloquean o piden clave a páginas abiertas como
+  // archivo local, así que usamos este. No trae nombres de países, solo la imagen de la Tierra.
+  const fondo = L.tileLayer(
+    "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg", {
+    maxNativeZoom: 8,
+    maxZoom: 8,
+    attribution: "Imágenes: NASA Blue Marble (GIBS)"
+  }).addTo(mapa);
+
+  // Si las imágenes no cargan, avisamos (el punto y el panel siguen funcionando)
+  let avisoMapa = false;
+  fondo.on("tileerror", function () {
+    if (!avisoMapa) {
+      avisoMapa = true;
+      console.warn("No cargaron las imágenes del mapa de fondo");
+      document.getElementById("avisoMapa").style.display = "block";
+    }
+  });
+
+  // El punto rojo que representa a la ISS
+  const punto = L.circleMarker([0, 0], {
+    radius: 9, color: "#ffffff", weight: 2, fillColor: "#e63946", fillOpacity: 1
+  });
+
+  // La estela: una línea que dibuja el recorrido
+  // "trazos" es una lista de tramos; cuando la ISS cruza el borde del mapa (longitud ±180)
+  // empezamos un tramo nuevo para que la línea no cruce todo el mapa de lado a lado.
+  let trazos = [];
+  const estela = L.polyline([], { color: "#e63946", weight: 2, opacity: 0.7 }).addTo(mapa);
+
+  let primeraVez = true;
+
+  // ---------- 2. FUNCIÓN QUE PIDE LOS DATOS Y ACTUALIZA TODO ----------
+  async function consultar() {
+    try {
+      // PEDIR: es el mismo "pedido" que hacía requests.get(...) en Python
+      const respuesta = await fetch(URL_API, { cache: "no-store" });
+
+      if (!respuesta.ok) {
+        // Un código distinto de 200 (por ejemplo 429 = demasiadas consultas)
+        throw new Error("La API respondió con el código " + respuesta.status);
+      }
+
+      // RECIBIR: convertimos el JSON en datos que JavaScript entiende
+      const datos = await respuesta.json();
+
+      // PROCESAR: sacamos lo que nos interesa de las "cajas"
+      const lat = datos.latitude;
+      const lon = datos.longitude;
+      const altitud = datos.altitude;       // kilómetros
+      const velocidad = datos.velocity;     // kilómetros por hora
+
+      // Mostrar los números en el panel
+      document.getElementById("lat").textContent = lat.toFixed(3) + "°";
+      document.getElementById("lon").textContent = lon.toFixed(3) + "°";
+      document.getElementById("alt").textContent = altitud.toFixed(1) + " km";
+      document.getElementById("vel").textContent =
+        Math.round(velocidad).toLocaleString("es-MX") + " km/h  (≈ " + (velocidad / 3600).toFixed(2) + " km/s)";
+      document.getElementById("vis").textContent = traducirVisibilidad(datos.visibility);
+      document.getElementById("hora").textContent = new Date(datos.timestamp * 1000).toUTCString();
+      document.getElementById("json").textContent = JSON.stringify(datos, null, 2);
+
+      // Mover el punto en el mapa
+      punto.setLatLng([lat, lon]);
+      if (primeraVez) {
+        punto.addTo(mapa);
+        mapa.setView([lat, lon], 3);
+        primeraVez = false;
+      }
+
+      // Agregar el punto a la estela
+      agregarAEstela(lat, lon);
+
+      // Seguir a la ISS si la casilla está marcada
+      if (document.getElementById("seguir").checked) {
+        mapa.panTo([lat, lon]);
+      }
+
+      estado.className = "";
+      estado.textContent = "✅ Actualizado a las " + new Date().toLocaleTimeString("es-MX") +
+                           " · se renueva cada " + CADA_SEGUNDOS + " s";
+
+    } catch (error) {
+      estado.className = "error";
+      estado.textContent = "⚠️ No se pudieron obtener datos (" + error.message + "). Reintentando...";
+      console.error(error);
+    }
+  }
+
+  // ---------- 3. FUNCIONES AUXILIARES ----------
+  function traducirVisibilidad(v) {
+    if (v === "daylight") return "Sí: está de día en su posición";
+    if (v === "eclipsed") return "No: está en la sombra de la Tierra (de noche)";
+    if (v === "visible") return "En el crepúsculo (puede verse desde tierra)";
+    return String(v);
+  }
+
+  function agregarAEstela(lat, lon) {
+    let tramo = trazos[trazos.length - 1];
+    if (!tramo) {
+      tramo = [];
+      trazos.push(tramo);
+    }
+    const anterior = tramo[tramo.length - 1];
+    // Si la longitud saltó más de 180°, la ISS cruzó el borde del mapa: tramo nuevo
+    if (anterior && Math.abs(lon - anterior[1]) > 180) {
+      tramo = [];
+      trazos.push(tramo);
+    }
+    tramo.push([lat, lon]);
+
+    // No dejamos que la estela crezca sin límite
+    let total = trazos.reduce((suma, t) => suma + t.length, 0);
+    while (total > MAX_PUNTOS_ESTELA && trazos.length > 0) {
+      trazos[0].shift();
+      if (trazos[0].length === 0) trazos.shift();
+      total--;
+    }
+    estela.setLatLngs(trazos);
+  }
+
+  document.getElementById("borrar").addEventListener("click", function () {
+    trazos = [];
+    estela.setLatLngs([]);
+  });
+
+  // ---------- 4. ARRANCAR ----------
+  consultar();                                    // primera consulta inmediata
+  setInterval(consultar, CADA_SEGUNDOS * 1000);   // y luego una cada CADA_SEGUNDOS segundos
+</script>
+</body>
+</html>
